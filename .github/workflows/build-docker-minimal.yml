@@ -3,13 +3,14 @@ name: Build Docker Image (Minimal)
 # ============================================
 # 最小化 Docker 镜像构建工作流
 # ============================================
-# 用途: 二开场景，构建并推送私有镜像到 GHCR
+# 用途: 二开场景，构建并推送公开镜像到 GHCR
 # 触发:
 #   - 推送 tag mygpt-v*  → 自动构建并打 tag + latest
 #   - 手动触发            → 输入版本号构建
 #
 # 镜像地址: ghcr.io/${owner}/mygpt:<version>
-# 部署服务器需先登录: docker login ghcr.io -u <user> -p <PAT(read:packages)>
+# 首次推送后到 GitHub Packages 页面将 Visibility 改为 Public，
+# 之后服务器无需 docker login 即可直接 pull。
 # ============================================
 
 on:
