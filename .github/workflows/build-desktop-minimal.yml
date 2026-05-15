@@ -1,0 +1,187 @@
+name: Build Desktop (Minimal, Unsigned)
+
+# ============================================
+# 最小化桌面端构建工作流（无签名 / 无自动更新 / 无统计）
+# ============================================
+# 用途: 二开场景，快速产出 .exe / .dmg 给用户下载
+# 触发:
+#   - 推送 tag v*  → 自动构建并发布到 GitHub Release
+#   - 手动触发     → 输入版本号，产物作为 draft release
+#
+# 注意:
+#   - macOS 产物未签名，用户首次打开需"系统设置 → 隐私与安全性 → 仍要打开"
+#   - Windows 产物未签名，用户首次运行会触发 SmartScreen 警告
+#   - 不上传 S3，不生成 latest*.yml（无自动更新）
+# ============================================
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to build (e.g., 1.0.0)'
+        required: true
+        type: string
+      build_mac_arm:
+        description: 'Build macOS (Apple Silicon)'
+        required: false
+        type: boolean
+        default: true
+      build_mac_intel:
+        description: 'Build macOS (Intel x64)'
+        required: false
+        type: boolean
+        default: true
+      build_windows:
+        description: 'Build Windows'
+        required: false
+        type: boolean
+        default: true
+
+concurrency:
+  group: ${{ github.ref }}-${{ github.workflow }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+env:
+  NODE_VERSION: '24.11.1'
+
+jobs:
+  # ============================================
+  # 解析版本号
+  # ============================================
+  prepare:
+    name: Prepare Version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      tag: ${{ steps.resolve.outputs.tag }}
+      is_manual: ${{ steps.resolve.outputs.is_manual }}
+    steps:
+      - id: resolve
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            v="${{ inputs.version }}"
+            v="${v#v}"
+            echo "version=${v}" >> $GITHUB_OUTPUT
+            echo "tag=v${v}" >> $GITHUB_OUTPUT
+            echo "is_manual=true" >> $GITHUB_OUTPUT
+          else
+            v="${{ github.ref_name }}"
+            echo "version=${v#v}" >> $GITHUB_OUTPUT
+            echo "tag=${v}" >> $GITHUB_OUTPUT
+            echo "is_manual=false" >> $GITHUB_OUTPUT
+          fi
+
+  # ============================================
+  # 构建矩阵（按手动选择过滤）
+  # ============================================
+  configure:
+    name: Configure Matrix
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set.outputs.matrix }}
+    steps:
+      - id: set
+        run: |
+          m='[]'
+          if [[ "${{ github.event_name }}" != "workflow_dispatch" ]] || [[ "${{ inputs.build_windows }}" == "true" ]]; then
+            m=$(echo "$m" | jq -c '. + [{"os":"windows-2025","name":"windows"}]')
+          fi
+          if [[ "${{ github.event_name }}" != "workflow_dispatch" ]] || [[ "${{ inputs.build_mac_arm }}" == "true" ]]; then
+            m=$(echo "$m" | jq -c '. + [{"os":"macos-15","name":"macos-arm64"}]')
+          fi
+          if [[ "${{ github.event_name }}" != "workflow_dispatch" ]] || [[ "${{ inputs.build_mac_intel }}" == "true" ]]; then
+            m=$(echo "$m" | jq -c '. + [{"os":"macos-15-intel","name":"macos-intel"}]')
+          fi
+          echo "matrix={\"include\":$m}" >> $GITHUB_OUTPUT
+
+  # ============================================
+  # 多平台构建
+  # ============================================
+  build:
+    needs: [prepare, configure]
+    name: Build (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.configure.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup build environment
+        uses: ./.github/actions/desktop-build-setup
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Set package version
+        run: npm run workflow:set-desktop-version ${{ needs.prepare.outputs.version }} stable
+
+      # macOS 构建前清理（修复 hdiutil 偶发失败）
+      - name: Clean previous build artifacts (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          sudo rm -rf apps/desktop/release || true
+          sudo rm -rf apps/desktop/dist || true
+          sudo rm -rf /tmp/electron-builder* || true
+
+      - name: Build desktop app
+        run: npm run desktop:package:app
+        env:
+          UPDATE_CHANNEL: stable
+          # 构建期占位常量（运行时由内嵌 CLI 用 localhost 启动）
+          APP_URL: http://localhost:3015
+          DATABASE_URL: 'postgresql://postgres@localhost:5432/postgres'
+          KEY_VAULTS_SECRET: ${{ secrets.KEY_VAULTS_SECRET }}
+          # Windows 临时目录（避免长路径问题）
+          TEMP: ${{ runner.os == 'Windows' && 'C:\temp' || '' }}
+          TMP: ${{ runner.os == 'Windows' && 'C:\temp' || '' }}
+          # macOS DMG 调试日志
+          DEBUG_DMG: ${{ runner.os == 'macOS' && 'true' || '' }}
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: build-${{ matrix.name }}
+          path: |
+            apps/desktop/release/*.dmg
+            apps/desktop/release/*.exe
+          retention-days: 14
+          if-no-files-found: error
+
+  # ============================================
+  # 汇总并发布到 GitHub Release
+  # ============================================
+  release:
+    needs: [prepare, build]
+    name: Publish GitHub Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v7
+        with:
+          path: release
+          pattern: build-*
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -lh release
+
+      - name: Create / Update GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ needs.prepare.outputs.tag }}
+          name: ${{ needs.prepare.outputs.tag }}
+          draft: ${{ needs.prepare.outputs.is_manual == 'true' }}
+          generate_release_notes: true
+          files: |
+            release/*.dmg
+            release/*.exe
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
