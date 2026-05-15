@@ -5,8 +5,8 @@ name: Build Desktop (Minimal, Unsigned)
 # ============================================
 # 用途: 二开场景，快速产出 .exe / .dmg 给用户下载
 # 触发:
-#   - 推送 tag v*  → 自动构建并发布到 GitHub Release
-#   - 手动触发     → 输入版本号，产物作为 draft release
+#   - 推送 tag mygpt-v*  → 自动构建并发布到 GitHub Release
+#   - 手动触发            → 输入版本号，产物作为 draft release
 #
 # 注意:
 #   - macOS 产物未签名，用户首次打开需"系统设置 → 隐私与安全性 → 仍要打开"
@@ -17,7 +17,7 @@ name: Build Desktop (Minimal, Unsigned)
 on:
   push:
     tags:
-      - 'v*'
+      - 'mygpt-v*'
   workflow_dispatch:
     inputs:
       version:
@@ -66,13 +66,14 @@ jobs:
         run: |
           if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
             v="${{ inputs.version }}"
+            v="${v#mygpt-v}"
             v="${v#v}"
             echo "version=${v}" >> $GITHUB_OUTPUT
-            echo "tag=v${v}" >> $GITHUB_OUTPUT
+            echo "tag=mygpt-v${v}" >> $GITHUB_OUTPUT
             echo "is_manual=true" >> $GITHUB_OUTPUT
           else
             v="${{ github.ref_name }}"
-            echo "version=${v#v}" >> $GITHUB_OUTPUT
+            echo "version=${v#mygpt-v}" >> $GITHUB_OUTPUT
             echo "tag=${v}" >> $GITHUB_OUTPUT
             echo "is_manual=false" >> $GITHUB_OUTPUT
           fi
